@@ -1,1 +1,225 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import sklearn 
+import urllib3
+import re
 
+#GET DATA FROM URL
+url='https://raw.githubusercontent.com/MicrosoftResearch/Azimuth/master/azimuth/data/FC_plus_RES_withPredictions.csv'
+http = urllib3.PoolManager()
+r = http.request('GET', url)
+
+#CREATE DATAFRAME 
+data=r.data
+str(data)
+data=data[122:]
+
+data=data.decode().split()
+data=[row.split(',') for row in data]
+data = [item for sublist in data for item in sublist]
+data=np.reshape(data,(5310,9)).astype(str)
+
+columns=['index','30mer','Target gene','Percent Peptide','Amino Acid Cut position','score_drug_gene_rank','score_drug_gene_threshold','drug','predictions'
+]
+data=pd.DataFrame(data,index=None,columns=columns)
+
+data['index']=data['index'].astype(int)
+data[['Percent Peptide','Amino Acid Cut position','score_drug_gene_rank',
+'score_drug_gene_threshold','predictions']]=data[['Percent Peptide','Amino Acid Cut position','score_drug_gene_rank',
+'score_drug_gene_threshold','predictions']].astype(float)      
+data[['30mer','Target gene','drug']]=data[['30mer','Target gene','drug']].astype(str)
+
+#FUNCTION: ONE-HOT ENCODING OF 30MER DATA
+from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import OneHotEncoder
+from numpy import argmax
+import string
+
+def labelencode_30mer(data):
+    key={'A':'1','C':'2','G':'3','T':'4'}
+    sequences=data['30mer']
+    int_sequences=[]
+    for seq in sequences:
+        for i in ['A','C','G','T']:
+            if i not in seq:
+                seq=seq+i
+            else:
+                seq=seq+'T'
+        for k, v in key.items():
+            seq=seq.replace(k,v)
+        int_sequences.append(seq)
+
+    final_sequence=[]
+
+    for seq in int_sequences:
+        l=np.array(list(seq))
+        onehot_encoder = OneHotEncoder(sparse=False)
+        l = l.reshape(len(l), 1)
+        onehot_encoded = onehot_encoder.fit_transform(l)
+        final_sequence.append(onehot_encoded[:30]) #do not include the last element, which was additional
+    
+    return final_sequence
+
+#FUNCTION: ONE-HOT ENCODING OF TARGET GENE DATA
+def labelencode_target(data):
+    genes=data['Target gene']
+    genes=np.array(genes)
+    label_encoder = LabelEncoder()
+    integer_encoded = label_encoder.fit_transform(genes)
+
+    onehot_encoder = OneHotEncoder(sparse=False)
+    integer_encoded = integer_encoded.reshape(len(integer_encoded), 1)
+    onehot_encoded = onehot_encoder.fit_transform(integer_encoded)
+    onehot_encoded=np.array(onehot_encoded)
+
+    final_sequence=[]
+    for element in onehot_encoded:
+        final_sequence.append(element)
+    
+    return final_sequence
+
+#FUNCTION: ONE-HOT ENCODING OF DRUG DATA
+def labelencode_drug(data):
+    drugs=data['drug']
+    drugs=np.array(drugs)
+
+    label_encoder=LabelEncoder()
+    integer_encoded=label_encoder.fit_transform(drugs)
+
+    onehot_encoder= OneHotEncoder(sparse=False)
+    integer_encoded= integer_encoded.reshape(len(integer_encoded),1)
+    onehot_encoded=onehot_encoder.fit_transform(integer_encoded)
+
+    final_sequence=[]
+    for element in onehot_encoded:
+        final_sequence.append(element)
+
+    return final_sequence
+
+#ONE-HOT ENCODE DATA
+data['30mer']=labelencode_30mer(data)
+data['Target gene']=labelencode_target(data)
+data['drug']=labelencode_drug(data)
+
+#NORMALIZATION OF NUMERIC DATA TO (0,1) RANGE
+data['Percent Peptide']=(data['Percent Peptide']-min(data['Percent Peptide']))/(max(data['Percent Peptide'])-min(data['Percent Peptide']))
+data['Amino Acid Cut position']=(data['Amino Acid Cut position']-min(data['Amino Acid Cut position']))/(max(data['Amino Acid Cut position'])-min(data['Amino Acid Cut position']))
+
+#FUNCTION: UNIFICATION OF 30MER DATA INTO ONE LIST
+def unify_30mer(train):
+    flat_list=[None]*5310
+    for i in range(5310):
+        sequence=train['30mer'].iloc[i]
+        temp=[]
+        for nucleotide in sequence:
+            for item in nucleotide:
+                temp.append(item)
+        flat_list[i]=temp
+    return flat_list    
+    
+#FUNCTION: UNIFICATION OF ALL FEATURES INTO ONE LIST
+def unify_all_features(train):
+    flat_list=[]
+    for i in range(5310):
+        all_features=train.iloc[i]
+        temp=[]
+        for index, feature in enumerate (all_features):
+            if index in (0,1,5):
+                for item in feature:
+                    temp.append(item)
+            else:
+                temp.append(feature)
+        flat_list.append(temp)
+
+    return flat_list
+    
+#SELECT RELEVANT FEATURES
+train=data[['30mer','Target gene','Percent Peptide', 'Amino Acid Cut position', 'score_drug_gene_threshold', 'drug']]
+
+#UNIFY 30MER DATA INTO ONE 120-ELEMENT LIST
+flat_list_30mer=unify_30mer(train)
+for i in range(5310):
+    train.set_value(i,'30mer',flat_list_30mer[i])
+
+#UNIFY ALL FEATURES INTO ONE 144-ELEMENT LIST
+flat_list_all_features=unify_all_features(train)
+train['all_features']=flat_list_all_features     
+
+#CREATE NEURAL NETWORK
+import tensorflow as tf
+from sklearn.utils.extmath import softmax
+
+fullX=train['all_features'].tolist()
+trainX=fullX[0:4700]
+fullY=data['score_drug_gene_rank'].tolist()
+fullY=np.asmatrix(np.array(fullY)).T
+trainY=fullY[0:4700]
+validX=np.array(fullX[4700:5309])
+validY=np.array(fullY[4700:5309])
+
+feature_count = np.array(trainX).shape[1]
+hidden_nodes=79
+num_labels=1
+
+x=tf.placeholder(dtype=tf.float64, shape=[None,feature_count], name='x')
+y_=tf.placeholder(tf.float64, shape=[None,1], name='y_')
+valid_x=tf.constant(validX)
+valid_y_=tf.constant(validY)
+
+def weight_variable(shape):
+  initial = tf.truncated_normal(shape, stddev=0.1,dtype=tf.float64)
+  return tf.Variable(initial)
+ 
+def bias_variable(shape):
+  initial = tf.constant(0, shape=shape,dtype=tf.float64)
+  return tf.Variable(initial)
+  
+layer1_weights = weight_variable([feature_count, hidden_nodes])
+layer1_biases = bias_variable([hidden_nodes])
+    
+layer2_weights = weight_variable([hidden_nodes, num_labels])
+layer2_biases = bias_variable([num_labels])
+
+#Three-Layer Network
+def three_layer_network(data):
+    input_layer = tf.add(tf.matmul(data,layer1_weights),layer1_biases)
+    hidden = tf.nn.relu(input_layer)
+    output_layer = tf.add(tf.matmul(hidden, layer2_weights),layer2_biases)
+    return output_layer
+    
+init=tf.global_variables_initializer()
+loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=y_, logits=three_layer_network(x)))
+reg = 0.8* (tf.reduce_mean(tf.square(layer1_weights)) + tf.reduce_mean(tf.square(layer2_weights)))
+optimizer = tf.train.GradientDescentOptimizer(1).minimize(loss+reg)
+
+train_prediction = tf.sigmoid(three_layer_network(x))  
+valid_prediction = tf.sigmoid(three_layer_network(valid_x))
+
+def accuracy(predictions, labels):
+    acc=  tf.sqrt(tf.reduce_mean(tf.squared_difference(labels, predictions)))
+    return acc
+
+#TRAIN MINIBATCHES AND MAKE PREDICTIONS FOR VALIDATION SET, CALCULATING THE ACCURACY
+batch_size=128
+num_steps = 500
+
+sess = tf.Session()
+sess.run(init)
+#training
+for step in range(num_steps):
+    offset = (step * batch_size) % (len(trainY) - batch_size)
+    # Generate a minibatch.
+    batch_data = np.array(trainX)[offset:(offset+batch_size),:]
+    batch_labels = trainY[offset:(offset + batch_size),0]
+    
+    feed_dict = {x : batch_data, y_ : batch_labels}
+    _, l, predictions = sess.run([optimizer, loss, train_prediction], feed_dict=feed_dict)
+    #if (step % 1000 == 0):
+    if (step==5000):    
+         print("Minibatch loss at step %d: %f" % (step, l))
+#pediction
+v_predictions=sess.run(valid_prediction)
+print(v_predictions)
+acc=sess.run(accuracy(v_predictions,validY))
+print(acc)
