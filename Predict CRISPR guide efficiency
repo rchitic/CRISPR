@@ -242,3 +242,127 @@ print(v_predictions,validY)
 print("Validation accuracy: %.1f%%" % accuracy(v_predictions, validY))
 #print("Test accuracy: %.1f%%" % accuracy(test_prediction.eval(), test_labels))
 
+#CROSS-VALIDATION MODIFICATION:
+#CREATE NEURAL NETWORK
+import tensorflow as tf
+from sklearn.utils.extmath import softmax
+
+fullX=train['all_features'].tolist()
+#trainX=fullX[0:4500]
+fullY=data['score_drug_gene_rank'].tolist()
+#fullY=np.asmatrix(np.array(fullY)).T
+#trainY=fullY[0:4500]
+#validX=np.array(fullX[4500:5309])
+#validY=np.array(fullY[4500:5309])
+
+feature_count = np.array(fullX).shape[1]
+#feature_count=144
+hidden_nodes=79
+num_labels=1
+
+x=tf.placeholder(dtype=tf.float64, shape=[None,feature_count], name='x')
+y_=tf.placeholder(tf.float64, shape=[None,1], name='y_')
+valid_x=tf.placeholder(tf.float64, shape=[None,144], name='valid_x')
+valid_y_=tf.placeholder(tf.float64, shape=[None,1], name='valid_y_')
+
+def weight_variable(shape):
+  initial = tf.truncated_normal(shape, stddev=0.1,dtype=tf.float64)
+  return tf.Variable(initial)
+ 
+def bias_variable(shape):
+  initial = tf.constant(0, shape=shape,dtype=tf.float64)
+  return tf.Variable(initial)
+
+#W=weight_variable([feature_count,1])
+#b=bias_variable([1])
+
+layer1_weights = weight_variable([feature_count, hidden_nodes])
+layer1_biases = bias_variable([hidden_nodes])
+    
+layer2_weights = weight_variable([hidden_nodes, num_labels])
+layer2_biases = bias_variable([num_labels])
+
+keep_prob = tf.placeholder(dtype=tf.float64)
+
+#Three-Layer Network
+def three_layer_network(data,keep_prob):
+    input_layer = tf.add(tf.matmul(data,layer1_weights),layer1_biases)
+    hidden = tf.nn.relu(input_layer)
+    hidden_dropout = tf.nn.dropout(hidden, keep_prob)
+    output_layer = tf.add(tf.matmul(hidden_dropout, layer2_weights),layer2_biases)
+    return output_layer
+
+def three_layer_network_no_dropout(data):
+    input_layer = tf.add(tf.matmul(data,layer1_weights),layer1_biases)
+    hidden = tf.nn.relu(input_layer)
+    output_layer = tf.add(tf.matmul(hidden, layer2_weights),layer2_biases)
+    return output_layer
+#decay_steps=100000    
+#decay_rate=tf.Variable(0.96,dtype=tf.float64)
+#g = tf.placeholder(dtype=tf.float64)  # count the number of steps taken.
+#g=tf.Variable(0)
+#learning_rate = tf.train.exponential_decay(1.0, global_step, 100000.0, 0.96)
+loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=y_, logits=three_layer_network(x,keep_prob)))
+reg = 1* (tf.reduce_mean(tf.square(layer1_weights)) + tf.reduce_mean(tf.square(layer2_weights)))
+optimizer = tf.train.AdamOptimizer(0.001, beta1=0.9, beta2=0.999, epsilon=1e-08, use_locking=False, name='Adam').minimize(loss+reg)
+#optimizer = tf.train.GradientDescentOptimizer(1).minimize(loss+reg)
+
+init=tf.global_variables_initializer()
+
+train_prediction = tf.sigmoid(three_layer_network(x,keep_prob))  
+valid_prediction = tf.sigmoid(three_layer_network_no_dropout(valid_x))
+
+def accuracy(predictions, labels):
+    acc=  tf.sqrt(tf.reduce_mean(tf.squared_difference(labels, predictions)))
+    return acc
+    
+#TRAIN MINIBATCHES AND MAKE PREDICTIONS FOR VALIDATION SET, CALCULATING THE ACCURACY
+batch_size=128
+num_steps = 2005
+
+sess = tf.Session()
+sess.run(init)
+
+all_predictions=[]
+from sklearn.model_selection import KFold
+kf = KFold(n_splits=5)
+
+KFold(n_splits=5, random_state=None, shuffle=False)
+for train_index, test_index in kf.split(fullX):
+    print("TRAIN:", train_index, "TEST:", test_index)
+    trainX, validX = [fullX[i] for i in train_index], [fullX[i] for i in test_index]
+    trainY, validY = [fullY[i] for i in train_index], [fullY[i] for i in test_index]  
+    trainY=np.reshape(np.array(trainY),(-1,1))
+    validY=np.reshape(np.array(validY),(-1,1))
+    
+    for step in range(num_steps):
+        offset = (step * batch_size) % (len(trainY) - batch_size)
+        # Generate a minibatch.
+        batch_data = np.array(trainX)[offset:(offset+batch_size),:]
+        batch_labels = trainY[offset:(offset + batch_size),0]
+        batch_labels=np.reshape(batch_labels,(-1,1))
+
+        # Prepare a dictionary telling the session where to feed the minibatch.
+        # The key of the dictionary is the placeholder node of the graph to be fed,
+        # and the value is the numpy array to feed to it.
+        # global_step=np.array(global_step+1)
+        feed_dict = {x : batch_data, y_ : batch_labels, keep_prob:0.5, valid_x : validX, valid_y_ : validY}
+        _, l, predictions = sess.run([optimizer, loss, train_prediction], feed_dict=feed_dict)
+        #if (step % 1000 == 0):
+        #if (step==500 or step==1000 or step==2000 or step==3000 or step==4000  ):    
+         #   print("Minibatch loss at step %d: %f" % (step, l))
+         #   print( predictions,batch_labels)
+         #   a=sess.run(accuracy(predictions,batch_labels))
+         #   print(a)
+    #print("Validation accuracy: %.1f%%" % accuracy(valid_prediction.eval(), valid_labels))
+    #print("Test accuracy: %.1f%%" % accuracy(test_prediction.eval(), test_labels))
+    v_predictions=sess.run(valid_prediction,feed_dict=feed_dict)
+    for i in range(0,len(v_predictions)):
+        all_predictions.append(v_predictions[i])
+    #print(v_predictions,validY)
+    #acc=sess.run(accuracy(v_predictions,validY),feed_dict=feed_dict)
+    #print(acc)
+
+from sklearn.metrics import mean_squared_error
+np.sqrt(mean_squared_error(fullY, all_predictions))    
+
